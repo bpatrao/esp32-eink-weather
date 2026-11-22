@@ -1,0 +1,16 @@
+# PlatformIO build output and downloaded libraries
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
