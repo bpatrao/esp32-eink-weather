@@ -4,6 +4,28 @@ A battery-friendly Wi-Fi weather display for the **LilyGO TTGO T5 V2.3** (ESP32 
 It sets itself up from your phone through a QR code, fetches forecasts from [Open-Meteo](https://open-meteo.com) (free, no API key),
 and deep-sleeps between updates. The e-paper keeps showing the last image while the board sleeps.
 
+## Quick upload
+
+To flash the firmware onto the board (or update it to the latest version):
+
+```sh
+# 1. Install PlatformIO (once)
+brew install platformio            # macOS; or: pip install -U platformio
+
+# 2. Get the code (first time), or update it (later)
+git clone git@github.com:bpatrao/esp32-eink-weather.git && cd esp32-eink-weather
+git pull                           # when updating an existing copy
+
+# 3. Plug the board in with a USB *data* cable, then build + upload
+pio run -t upload
+
+# 4. Optional: watch the log (Ctrl+C to quit)
+pio device monitor
+```
+
+Your saved Wi-Fi and location settings are kept across uploads. See [Building and uploading new versions](#building-and-uploading-new-versions)
+for details, choosing a serial port, other builds, and [troubleshooting](#troubleshooting).
+
 ## Features
 
 - **Phone setup:** the screen shows a QR code. Scan it, join the board's Wi-Fi, and a settings page opens automatically
