@@ -25,7 +25,8 @@ struct ViewContext {
 
 void uiInit();
 // QR code to join the setup access point + instructions (+ optional error).
-void uiSetupScreen(const String& apSsid, const String& apPass, const String& error);
+// homeIp: the board's address on the home Wi-Fi for OTA updates ("" if not joined).
+void uiSetupScreen(const String& apSsid, const String& apPass, const String& error, const String& homeIp = "");
 // Simple full-screen status message.
 void uiMessage(const String& title, const String& l1, const String& l2 = "", const String& l3 = "");
 // Draws one view. fast = partial refresh (quick, no flashing; only valid

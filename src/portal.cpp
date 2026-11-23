@@ -1,12 +1,14 @@
 #include "portal.h"
 #include <DNSServer.h>
+#include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <algorithm>
 #include <vector>
 #include "display_ui.h"
 
-static constexpr uint32_t PORTAL_TIMEOUT_MS = 10 * 60 * 1000;  // since last page request
+static constexpr uint32_t PORTAL_TIMEOUT_MS = 10 * 60 * 1000;  // since last page request / OTA activity
+static constexpr uint32_t HOME_WIFI_TIMEOUT_MS = 10000;
 static const IPAddress AP_IP(192, 168, 4, 1);
 static const uint16_t REFRESH_OPTIONS[] = {15, 30, 60, 120, 180};
 
@@ -16,6 +18,9 @@ static Settings* cfg;
 static std::vector<String> networks;
 static uint32_t lastActivity = 0;
 static uint32_t restartAt = 0;
+static String otaPass;  // = setup Wi-Fi password; guards /update on the home network
+static bool uploadOk = false;
+static String uploadError;
 
 static String esc(const String& in) {
   String s = in;
@@ -25,6 +30,33 @@ static String esc(const String& in) {
   s.replace("\"", "&quot;");
   s.replace("'", "&#39;");
   return s;
+}
+
+// The settings page and the web firmware upload are only served to devices on
+// the password-protected setup network, not to the whole home network.
+static bool fromAp() {
+  if (server.client().localIP() == AP_IP) return true;
+  server.send(403, "text/plain", "Join the display's setup Wi-Fi to use this page.");
+  return false;
+}
+
+// Firmware upload: open on the setup network, and on the home network with
+// HTTP basic auth (any user name, the setup password). Sends the auth
+// challenge and returns false when not allowed.
+static bool updateAllowed() {
+  if (server.client().localIP() == AP_IP) return true;
+  if (otaPass.length() && server.authenticate("ota", otaPass.c_str())) return true;
+  server.requestAuthentication(BASIC_AUTH, "T5 weather update", "Use the password shown on the display.");
+  return false;
+}
+
+// Leave setup mode after an update if the saved settings are known to work,
+// so the board restarts straight into the weather app.
+static void finishSetupAfterUpdate() {
+  if (cfg->verified) {
+    cfg->needsSetup = false;
+    config::save(*cfg);
+  }
 }
 
 static void scanNetworks() {
@@ -68,6 +100,7 @@ static String page(const String& body) {
 
 static void handleRoot() {
   lastActivity = millis();
+  if (!fromAp()) return;
   const Settings& s = *cfg;
   String b;
   b.reserve(4096);
@@ -99,6 +132,7 @@ static void handleRoot() {
   }
   b += F("</select></div></div><div class='hint'>Longer intervals make the battery last longer.</div>"
          "<button type='submit'>Save and connect</button></form>"
+         "<p class='hint' style='text-align:center;margin-top:18px'><a href='/update'>Firmware update</a></p>"
          "<script>function pick(e){var s=document.getElementById('ssid');"
          "if(e.value=='__other'){s.value='';s.focus();}else if(e.value){s.value=e.value;document.getElementById('pass').focus();}}</script>");
   server.send(200, "text/html", page(b));
@@ -106,6 +140,7 @@ static void handleRoot() {
 
 static void handleSave() {
   lastActivity = millis();
+  if (!fromAp()) return;
   Settings& s = *cfg;
   String ssid = server.arg("ssid"), pass = server.arg("pass"), loc = server.arg("loc");
   ssid.trim();
@@ -144,10 +179,99 @@ static void handleSave() {
   restartAt = millis() + 1500;  // let the response reach the phone first
 }
 
+// ---------- firmware update from the browser ----------
+
+static void handleUpdatePage() {
+  lastActivity = millis();
+  if (!updateAllowed()) return;
+  server.send(200, "text/html",
+              page(F("<h1>Firmware update</h1><p class='sub'>Choose the <b>firmware.bin</b> built by PlatformIO "
+                     "(<i>.pio/build/weather/firmware.bin</i>). Settings are kept.</p>"
+                     "<form method='POST' action='/update' enctype='multipart/form-data'>"
+                     "<input type='file' name='fw' accept='.bin' required>"
+                     "<button type='submit'>Upload and install</button></form>"
+                     "<div class='hint'>Takes about 30 s. Keep this page open until it reports back.</div>"
+                     "<p class='hint' style='text-align:center;margin-top:18px'><a href='/'>Back to settings</a></p>")));
+}
+
+static void handleUpdateUpload() {
+  lastActivity = millis();
+  HTTPUpload& up = server.upload();
+  switch (up.status) {
+    case UPLOAD_FILE_START:
+      uploadOk = false;
+      uploadError = "";
+      if (server.client().localIP() != AP_IP && !(otaPass.length() && server.authenticate("ota", otaPass.c_str()))) {
+        uploadError = "Wrong or missing password.";
+        return;
+      }
+      Serial.printf("Web update: %s\n", up.filename.c_str());
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) uploadError = Update.errorString();
+      break;
+    case UPLOAD_FILE_WRITE:
+      if (uploadError.isEmpty() && Update.write(up.buf, up.currentSize) != up.currentSize)
+        uploadError = Update.errorString();
+      break;
+    case UPLOAD_FILE_END:
+      if (uploadError.isEmpty()) {
+        if (Update.end(true)) uploadOk = true;
+        else uploadError = Update.errorString();
+      }
+      Serial.printf("Web update: %u bytes, %s\n", (unsigned)up.totalSize, uploadOk ? "ok" : uploadError.c_str());
+      break;
+    case UPLOAD_FILE_ABORTED:
+      Update.abort();
+      uploadError = "Upload interrupted.";
+      break;
+  }
+}
+
+static void handleUpdateDone() {
+  lastActivity = millis();
+  if (!updateAllowed()) {
+    if (Update.isRunning()) Update.abort();
+    return;
+  }
+  if (!uploadOk) {
+    if (Update.isRunning()) Update.abort();
+    server.send(400, "text/html",
+                page("<h1>Update failed</h1><div class='err'>" + esc(uploadError.length() ? uploadError : "No file received.") +
+                     "</div><p>The current firmware is unchanged. <a href='/update'>Try again</a></p>"));
+    return;
+  }
+  server.send(200, "text/html",
+              page(F("<h1>Update installed</h1><p>The display is restarting with the new firmware.</p>")));
+  finishSetupAfterUpdate();
+  uiMessage("Update installed", "Restarting...");
+  restartAt = millis() + 500;
+}
+
+// Joins the saved home Wi-Fi alongside the setup access point, so the board
+// can also be updated over the home network. Only with settings that worked.
+static String joinHomeWifi(const Settings& s, const String& host) {
+  if (!s.verified || s.ssid.isEmpty()) return "";
+  WiFi.setHostname(host.c_str());
+  WiFi.begin(s.ssid.c_str(), s.pass.c_str());
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < HOME_WIFI_TIMEOUT_MS) delay(100);
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Home Wi-Fi not reachable, setup network only");
+    WiFi.disconnect();
+    return "";
+  }
+  String ip = WiFi.localIP().toString();
+  Serial.printf("Home Wi-Fi %s, IP %s\n", s.ssid.c_str(), ip.c_str());
+  return ip;
+}
+
 // Any unknown URL (including the OS captive-portal probes such as
 // /generate_204 and /hotspot-detect.html) is sent to the form.
 static void handleRedirect() {
   lastActivity = millis();
+  if (server.client().localIP() != AP_IP) {
+    server.send(404, "text/plain", "Not found");
+    return;
+  }
   server.sendHeader("Location", String("http://") + AP_IP.toString() + "/", true);
   server.send(302, "text/plain", "");
 }
@@ -166,13 +290,17 @@ void runPortal(Settings& s) {
   char suffix[5];
   snprintf(suffix, sizeof(suffix), "%02X%02X", mac[4], mac[5]);
   String apSsid = String("T5-Weather-") + suffix;
-  String apPass = randomPassword();
+  String host = String("t5-weather-") + suffix;  // DHCP host name on the home Wi-Fi
+  host.toLowerCase();
+  String apPass = randomPassword();  // also the OTA password
 
   Serial.println("Entering setup mode");
   scanNetworks();
-  uiSetupScreen(apSsid, apPass, s.lastError);
+  // Home Wi-Fi first: the access point then starts on the same channel.
+  WiFi.mode(WIFI_AP_STA);
+  String homeIp = joinHomeWifi(s, host);
+  uiSetupScreen(apSsid, apPass, s.lastError, homeIp);
 
-  WiFi.mode(WIFI_AP);
   WiFi.softAPConfig(AP_IP, AP_IP, IPAddress(255, 255, 255, 0));
   WiFi.softAP(apSsid.c_str(), apPass.c_str());
   dns.setErrorReplyCode(DNSReplyCode::NoError);
@@ -180,9 +308,14 @@ void runPortal(Settings& s) {
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/save", HTTP_POST, handleSave);
+  server.on("/update", HTTP_GET, handleUpdatePage);
+  server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
   server.onNotFound(handleRedirect);
   server.begin();
   Serial.printf("AP '%s' password '%s' at %s\n", apSsid.c_str(), apPass.c_str(), AP_IP.toString().c_str());
+  otaPass = apPass;
+  Serial.printf("OTA: http://%s/update, password '%s'\n", homeIp.length() ? homeIp.c_str() : AP_IP.toString().c_str(),
+                apPass.c_str());
 
   lastActivity = millis();
   for (;;) {

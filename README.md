@@ -65,7 +65,7 @@ for details, choosing a serial port, other builds, and [troubleshooting](#troubl
 | Action | Result |
 |---|---|
 | Short press | Next view. Further presses within 20 s use the fast (partial) refresh. |
-| Hold 3 s | Open the setup portal (to change Wi-Fi, location, units or interval) |
+| Hold 3 s | Open the setup portal (to change Wi-Fi, location, units or interval, or to update the firmware over Wi-Fi) |
 | RST | Restart: back to Home with freshly fetched data |
 
 ## First-time setup (on the device)
@@ -133,12 +133,38 @@ git pull
 pio run -t upload
 ```
 
+### Updating over Wi-Fi (OTA)
+
+No cable needed. Hold the button for 3 s to put the board in **setup mode**. It stays awake with Wi-Fi on for
+10 minutes after the last page visit or upload, and the setup screen shows:
+
+- `Pass:` the setup Wi-Fi password, which is also the **OTA password** (new each time setup starts)
+- `OTA:` the board's IP on your home Wi-Fi (only when the saved settings have connected before)
+
+From PlatformIO, on the same home network:
+
+```sh
+T5_OTA_HOST=<OTA IP from screen> T5_OTA_PASS=<pass from screen> pio run -e ota -t upload
+```
+
+This builds the app and POSTs it to `http://<ip>/update` with `curl` (HTTP basic auth, user `ota`, the setup password).
+The Mac only makes an outgoing connection, so it works with a firewall that blocks incoming connections
+(PlatformIO's usual `espota` method does not).
+
+From a browser: open `http://<OTA IP>/update` (user `ota`, the setup password), or join the `T5-Weather-XXXX` setup
+network and open `http://192.168.4.1/update` (no extra login; also linked at the bottom of the settings page).
+Upload `.pio/build/weather/firmware.bin` (built with `pio run`).
+
+After a successful update the board restarts straight into the weather app with your settings kept. If the
+new firmware fails to install, the old one keeps running. The settings page itself is only served on the setup network.
+
 ### Other builds (environments)
 
 | Command | What it does |
 |---|---|
 | `pio run -t upload` | The weather app (default `weather` environment) |
 | `pio run -e weather_preview -t upload` | Same app, but after each fetch it also dumps every view's frame buffer over serial, for checking layouts without looking at the screen. Convert the dump with `python3 tools/frames_to_png.py <serial.log> <out_dir>`. Flash the normal build afterwards, because dumping on every wake wastes battery. |
+| `T5_OTA_HOST=<ip> T5_OTA_PASS=… pio run -e ota -t upload` | The weather app, uploaded over Wi-Fi (see [Updating over Wi-Fi](#updating-over-wi-fi-ota)) |
 | `pio run -e driver_test -t upload` | Draws a test pattern with the panel driver name, to find the right driver for other panel variants |
 | `pio run -e probe -t upload` | Prints ADC pin voltages and reports pin changes, for finding battery and button pins on other board revisions |
 
@@ -159,7 +185,7 @@ platformio.ini        build environments and library versions
 src/
   main.cpp            boot flow: buttons, views, refresh schedule, deep sleep
   config.*            settings stored in NVS
-  portal.*            setup access point, captive portal and settings page
+  portal.*            setup access point, captive portal, settings page and OTA updates
   weather.*           Open-Meteo forecast, air quality and geocoding
   cityimage.*         Wikipedia photo download, JPEG decode, Atkinson dither, NVS cache
   display_ui.*        all screens, icons and drawing helpers (GxEPD2)

@@ -283,7 +283,7 @@ static bool makeQr(const String& text) {
   return esp_qrcode_generate(&cfg, text.c_str()) == ESP_OK && qrSize > 0;
 }
 
-void uiSetupScreen(const String& apSsid, const String& apPass, const String& error) {
+void uiSetupScreen(const String& apSsid, const String& apPass, const String& error, const String& homeIp) {
   // Standard Wi-Fi QR format understood by iOS and Android cameras
   bool haveQr = makeQr("WIFI:T:WPA;S:" + apSsid + ";P:" + apPass + ";;");
   int scale = haveQr ? min(3, 110 / qrSize) : 0;
@@ -309,11 +309,13 @@ void uiSetupScreen(const String& apSsid, const String& apPass, const String& err
     smallText("Wi-Fi: " + apSsid, tx, 58);
     smallText("Pass:  " + apPass, tx, 68);
     smallText("Page:  192.168.4.1", tx, 78);
+    if (homeIp.length()) smallText("OTA:   " + homeIp, tx, 88);
 
     if (error.length()) {
-      display.fillRect(tx - 3, 89, W - tx + 3, 33, BLACK);
+      int top = homeIp.length() ? 99 : 89;
+      display.fillRect(tx - 3, top, W - tx + 3, H - top, BLACK);
       display.setTextColor(WHITE);
-      wrapSmall(error, tx, 92, (W - tx) / 6, 3);
+      wrapSmall(error, tx, top + 3, (W - tx) / 6, (H - top - 3) / 10);
       display.setTextColor(BLACK);
     }
   } while (display.nextPage());
@@ -342,16 +344,31 @@ void uiMessage(const String& title, const String& l1, const String& l2, const St
 static const char* WEEKDAYS[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 static const char* WEEKDAYS2[] = {"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"};
 
-// Battery outline with fill proportional to charge; `right` is the nub's right edge.
-// (The exact percentage is on the Info view.)
+// Battery outline with fill proportional to charge and the percentage written
+// inside (black on the empty part, white on the filled part); `right` is the
+// nub's right edge.
+static constexpr int BAT_W = 24, BAT_H = 11;  // body; the nub adds 2 px
 static void drawBattery(int pct, int right, int top) {
-  const int w = 20, h = 10;
-  int x = right - 2 - w;
-  display.drawRect(x, top, w, h, BLACK);
-  display.fillRect(x + w, top + 3, 2, h - 6, BLACK);  // nub
-  int fill = (w - 4) * constrain(pct, 0, 100) / 100;
+  pct = constrain(pct, 0, 100);
+  int x = right - 2 - BAT_W;
+  display.drawRect(x, top, BAT_W, BAT_H, BLACK);
+  display.fillRect(x + BAT_W, top + 3, 2, BAT_H - 6, BLACK);  // nub
+  const int inW = BAT_W - 4, inH = BAT_H - 4, inX = x + 2, inY = top + 2;
+  int fill = inW * pct / 100;
   if (pct > 0 && fill == 0) fill = 1;
-  display.fillRect(x + 2, top + 2, fill, h - 4, BLACK);
+  display.fillRect(inX, inY, fill, inH, BLACK);
+
+  // Render the number off-screen, then copy it in the colour that contrasts
+  // with whatever is underneath each pixel.
+  String label(pct);
+  GFXcanvas1 canvas(inW, inH);
+  canvas.fillScreen(0);
+  canvas.setTextColor(1);
+  canvas.setCursor((inW - ((int)label.length() * 6 - 1)) / 2, 0);
+  canvas.print(label);
+  for (int cy = 0; cy < inH; cy++)
+    for (int cx = 0; cx < inW; cx++)
+      if (canvas.getPixel(cx, cy)) display.drawPixel(inX + cx, inY + cy, cx < fill ? WHITE : BLACK);
 }
 
 // Small dots showing which view is active.
@@ -370,7 +387,7 @@ static void header(const ViewContext& c, View v, const String& title) {
   printRight(c.w.updated, W - 4, 13);
   int batRight = W - 4 - timeW - 6;
   drawBattery(c.batteryPct, batRight, 3);
-  int dotsRight = batRight - 22 - 8;
+  int dotsRight = batRight - (BAT_W + 2) - 6;
   pageDots(v, dotsRight, 8);
   int dotsLeft = dotsRight - (VIEW_COUNT - 1) * 5;
   display.setFont(&FreeSansBold9pt7b);
@@ -731,7 +748,7 @@ static void viewInfo(const ViewContext& c) {
   // value in the normal font, extra detail after it in the small font
   struct { const char* label; String value; String extra; } rows[] = {
       {"Wi-Fi", s.ssid, ""},
-      {"IP", w.ip, "signal " + String(w.rssi) + " dBm"},
+      {"IP", w.ip, String(w.rssi) + " dBm"},  // short extra: the IP needs up to 135 px
       {"Location", s.place, coords},
       {"Units", String(s.imperial ? "Imperial" : "Metric") + ", every " + refresh, ""},
       {"Battery", String(c.batteryMv / 1000.0f, 2) + " V", String(c.batteryPct) + "%"},
@@ -747,7 +764,11 @@ static void viewInfo(const ViewContext& c) {
   }
   display.fillRect(0, H - 14, W, 14, BLACK);
   display.setTextColor(WHITE);
-  smallCentered("Hold the button 3 s to change settings", W / 2, H - 11);
+  // Build stamp (compile time of this file), e.g. "fw Nov 23 16:20", to see
+  // which firmware is installed after an OTA update.
+  String stamp = String(__DATE__).substring(0, 6) + " " + String(__TIME__).substring(0, 5);
+  stamp.replace("  ", " ");  // __DATE__ pads single-digit days
+  smallCentered("Hold 3 s for setup - fw " + stamp, W / 2, H - 11);
   display.setTextColor(BLACK);
 }
 
